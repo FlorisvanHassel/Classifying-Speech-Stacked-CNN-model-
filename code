@@ -1,0 +1,711 @@
+import numpy as np
+import pandas as pd
+import os
+import glob
+import random
+import keras
+from scipy import misc
+from PIL import Image
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+from keras.layers import Dense
+from keras.layers import LSTM
+from keras.models import Sequential, Model
+from keras.preprocessing import sequence
+from keras import preprocessing, layers
+from keras.utils.np_utils import to_categorical
+from keras.layers.embeddings import Embedding
+from keras.layers import Input, Activation, Dense
+from keras.layers import LeakyReLU
+from keras.regularizers import l2
+from keras.layers.core import Flatten, Dropout
+from keras.layers import Conv2D, MaxPool2D, BatchNormalization, MaxPooling2D, GlobalAveragePooling2D
+from keras.optimizers import SGD
+from keras.layers import Dense, Dropout, Flatten, Conv1D, MaxPooling1D, GlobalAveragePooling1D, Conv2D
+from keras.layers.merge import concatenate
+from sklearn.metrics import accuracy_score
+from keras.preprocessing import sequence
+from keras.models import load_model
+from keras.utils import to_categorical
+from keras.utils import plot_model
+%matplotlib inline
+print(keras.__version__)
+np.random.seed(15)
+
+
+feat = np.load('feat.npy', allow_pickle=True)
+path = np.load('path.npy', allow_pickle=True)
+train_data_MFCC = pd.read_csv('train.csv')
+test_data_MFCC = pd.read_csv('test.csv')
+
+print('train data:', len(train_data_MFCC))
+print('test data:', len(test_data_MFCC))
+
+print(path.shape)
+print(feat.shape)
+print()
+print(feat[0].shape)
+
+
+class_name, class_count = np.unique(np.asarray([ i for i in train_data_MFCC['word']]), return_counts=True)
+y_position = np.arange(len(train_data_MFCC['word'].unique()))
+plt.figure(figsize=(18,7))
+plt.bar(y_position, class_count, align='center', alpha=0.8)
+plt.xticks(y_position, class_name, rotation = 'vertical')
+plt.xlabel('Number of classes')
+plt.title('Distribution of each class in the dataset')
+plt.show()
+print('number of classes:', len(class_name))
+
+
+def combine_path_feat(path_data, feat_data, train_MFCC, test_MFCC):
+    
+    train_features = pd.DataFrame(np.asarray(list(zip(path_data,feat_data))))
+    train_features.columns = ['path', 'feat']
+      
+    train_data_f = pd.merge(train_features, train_MFCC, on = 'path')
+    assignment_test_data_f = pd.merge(train_features, test_MFCC, on = 'path')
+
+    train_data_array = np.asarray(train_data_f)
+    assignment_test_data_array = np.asarray(assignment_test_data_f)
+    
+    return(train_data_array, assignment_test_data_array)
+
+train_MFCC_words, assignment_test_data = combine_path_feat(path, feat, train_data_MFCC, test_data_MFCC)
+train_MFCC = train_MFCC_words[:,1]
+train_words = train_MFCC_words[:,2]
+
+print(train_MFCC_words.shape)
+print(assignment_test_data.shape)
+print()
+print(train_MFCC.shape)
+print(train_words.shape)
+
+
+# In[23]:
+
+
+def order_assignment_test_data(assignment_data):
+    assignment_test_data_combined = pd.DataFrame(assignment_data)
+    assignment_test_data_ordered = test_data_MFCC.set_index('path').join(assignment_test_data_combined.set_index(0))
+    assignment_test_data_ordered_f = np.asarray(assignment_test_data_ordered[1])
+    return(assignment_test_data_ordered_f)
+
+assignment_test_data_ordered_array = order_assignment_test_data(assignment_test_data)
+print(assignment_test_data_ordered_array.shape)
+
+
+# In[24]:
+
+
+X_train, X_val, y_train, y_val = train_test_split(train_MFCC, train_words, test_size=2/10, random_state=404)
+X_val, X_test, y_val, y_test = train_test_split(X_val, y_val, test_size=1/2, random_state=404)
+
+
+print(X_train.shape)
+print(y_train.shape)
+print()
+print(X_val.shape)
+print(y_val.shape)
+print()
+print(X_test.shape)
+print(y_test.shape)
+
+# if you change the proportion, also change the randint value, because it might not be able to pick the last row. 
+# Or it goes beyond the last row and make an error
+
+def frequency_delete(each_datapoint):
+    randint = np.random.randint(0, 13)
+    each_datapoint[:,randint] = np.zeros((each_datapoint.shape[0]))
+    return each_datapoint
+
+
+def time_delete(each_datapoint):    
+    percentage_del = random.randrange(5, 11, 1)/100
+    
+    full_len = each_datapoint.shape[0]
+    proportion = int(full_len*percentage_del)
+    randint = np.random.randint(0, full_len-(proportion-1))
+    all_index = np.arange(full_len)
+    delete_index = np.arange(randint, (randint+proportion))
+    new_index = np.delete(all_index, delete_index, None)
+    return each_datapoint[new_index]
+
+
+# if you change the proportion, also change the randint value, because it might not be able to pick the last row. 
+# Or it goes beyond the last row and make an error
+
+def time_masker(each_datapoint):    
+    percentage_del = random.randrange(5, 14, 1)/100
+    
+    full_len = each_datapoint.shape[0]
+    proportion = int(full_len*percentage_del)
+    randint = np.random.randint(0, full_len-(proportion-1))
+    all_index = np.arange(full_len)
+    delete_index = np.arange(randint, (randint+proportion))
+    lenght_0 = each_datapoint.shape[1]
+    each_datapoint[delete_index] = np.zeros(lenght_0)
+    return each_datapoint 
+
+
+# randomly remove some timesteps at the beginning or in the end
+# (why? because some records start a bit too late when recording)
+def truncater(each_datapoint):
+    percentage_del = random.randrange(7, 16, 1)/100
+    full_len = each_datapoint.shape[0]
+    random_position = np.random.randint(0,2)
+
+    if random_position == 0:
+        each_datapoint = each_datapoint[int(full_len*percentage_del):, :]
+    else:
+        each_datapoint = each_datapoint[:-int(full_len*percentage_del),:]
+
+    return each_datapoint
+
+
+def zero_iq_timewarper(each_datapoint):
+    del_step = random.randrange(8, 13, 1) # deleting every 5~11th element in the array
+    #print(del_step)
+    deleted_datapoint = np.delete(each_datapoint, np.s_[::del_step], 0)
+    return deleted_datapoint
+
+
+def upsample_data(X, y):
+    combined_unupsampled = []
+    for i,j in zip(X, y):
+        combined_unupsampled.append([i,j])
+    
+    combined_unupsampled = np.asarray(combined_unupsampled)
+    
+    class_name_sample, class_count_unupsampled = np.unique([ i for i in y], return_counts=True)
+
+    classes_counts = []
+    for i, j in zip(class_name_sample, class_count_unupsampled):
+        classes_counts.append([i,j])
+    
+    highest_class_count = classes_counts[np.argmax(np.asarray(class_count_unupsampled))][1]
+    
+    upsampled_data_f = []
+    for e, i in enumerate(class_name_sample):
+        temp_data = []
+        if classes_counts[e][1] < highest_class_count:
+
+            for j in range(0, len(combined_unupsampled)):
+                if i == combined_unupsampled[j][1]:
+                    temp_data.append(combined_unupsampled[j])
+            
+            copy_indexes = np.random.choice(len(temp_data), (highest_class_count-(classes_counts[e][1])))
+            temp_data_array = np.asarray(temp_data)
+            new_data = temp_data_array[copy_indexes]
+            for k in temp_data:
+                upsampled_data_f.append(k)
+                k1 = [time_delete(k[0]),k[1]]
+                upsampled_data_f.append(k1)        # double our data
+                # more sample from freq del
+                k2 = [frequency_delete(k[0]),k[1]]  
+                upsampled_data_f.append(k2)        # tripple
+                # more sample from time&freq del
+                k3 = [time_delete(frequency_delete(k[0])), k[1]]
+                upsampled_data_f.append(k3)        # quadrupple
+                k4 = [time_delete(time_delete(frequency_delete(frequency_delete(k[0])))), k[1]]
+                upsampled_data_f.append(k4)        # pentafold
+
+            for l in new_data:
+                upsampled_data_f.append(l)
+                l1 = [time_delete(l[0]),l[1]]
+                upsampled_data_f.append(l1)        # double our data
+                # more sample from frew del
+                l2 = [frequency_delete(l[0]),l[1]]
+                upsampled_data_f.append(l2)        # tripple
+                # more sample from time&freq del
+                l3 = [time_delete(frequency_delete(l[0])), l[1]]
+                upsampled_data_f.append(l3)        # quadrupple
+                l4 = [time_delete(time_delete(frequency_delete(frequency_delete(l[0])))), l[1]]
+                upsampled_data_f.append(l4)        # pentafold 
+                
+        else:
+            for m in range(0, len(combined_unupsampled)):
+                if i == combined_unupsampled[m][1]:
+                    upsampled_data_f.append(combined_unupsampled[m])
+                    upsampled_data_f.append([time_delete(combined_unupsampled[m][0]), combined_unupsampled[m][1]])                   # double data
+                    upsampled_data_f.append([frequency_delete(combined_unupsampled[m][0]), combined_unupsampled[m][1]])              # tripple
+                    upsampled_data_f.append([time_delete(frequency_delete(combined_unupsampled[m][0])), combined_unupsampled[m][1]]) # quadrupple
+                    upsampled_data_f.append([time_delete(time_delete(frequency_delete(frequency_delete(combined_unupsampled[m][0])))), combined_unupsampled[m][1]]) # pentafold
+
+                    
+    shuffled_index = np.arange(len(upsampled_data_f)) 
+    upsampled_data_array = np.asarray(upsampled_data_f)
+    np.random.shuffle(upsampled_data_array)
+    X_train_upsampled_f = upsampled_data_array[:,0]
+    y_train_upsampled_f = upsampled_data_array[:,1]
+    
+    return(X_train_upsampled_f, y_train_upsampled_f)
+
+X_train_upsampled, y_train_upsampled = upsample_data(X_train, y_train)
+
+# data histogram in the training data after upsampling
+class_name_train, class_count_train = np.unique([ i for i in y_train_upsampled], return_counts=True)
+y_position = np.arange(len(pd.DataFrame(y_train_upsampled)[0].unique()))
+plt.figure(figsize=(18,7))
+plt.bar(y_position, class_count_train, align='center', alpha=0.8)
+plt.xticks(y_position, class_name_train, rotation = 'vertical')
+plt.xlabel('Number of classes')
+plt.title('Distribution of each class in the dataset')
+plt.show()
+print('number of classes:', len(class_name_train))
+
+def zero_padd(data_unpadded):
+    data_padded = np.zeros((data_unpadded.shape[0], 99, 13))
+
+    for e, i in enumerate(data_unpadded):
+        data_padded[e][0 : i.shape[0], 0: i.shape[1]] = i
+    return data_padded
+
+X_train_padded = zero_padd(X_train_upsampled)
+X_val_padded = zero_padd(X_val)
+X_test_padded = zero_padd(X_test)
+assignment_test_padded = zero_padd(assignment_test_data_ordered_array)
+                                
+print(X_train_padded.shape)
+print(X_val_padded.shape)
+print(X_test_padded.shape)
+print(assignment_test_padded.shape)
+
+# create a dictionary for class_name
+class_name, class_count = np.unique(np.asarray([ i for i in train_data_MFCC['word']]), return_counts=True)
+class_name_dict = {}
+for e, name in enumerate(class_name):
+    class_name_dict[name] = e
+    
+
+# target class
+def change_to_categorical(normal_data):
+    categorized_y= []
+    for label in normal_data:
+        categorized_y.append(class_name_dict[str(label)])
+    categorized_y_array = np.asarray(keras.utils.to_categorical(categorized_y, num_classes=35, dtype='float32'))
+    return categorized_y_array
+        
+categorized_y_train = change_to_categorical(y_train_upsampled)
+categorized_y_val = change_to_categorical(y_val)
+categorized_y_test = change_to_categorical(y_test)
+
+
+print(categorized_y_train.shape)
+print(categorized_y_val.shape)
+print(categorized_y_test.shape)
+
+## Make a Stacked model 
+
+# First model 
+
+model = Sequential()
+model.add(Conv1D(256, 5, activation='relu', padding='same', input_shape=(99, 13)))
+model.add(BatchNormalization())
+model.add(Conv1D(256, 5, activation='relu', padding='same'))
+model.add(MaxPooling1D(3))
+model.add(Conv1D(512, 5, activation='relu', padding='same'))
+model.add(Dropout(0.35))
+model.add(Conv1D(512, 5, activation='relu', padding='same'))
+model.add(GlobalAveragePooling1D())
+model.add(Dropout(0.50))
+model.add(Dense(35, activation='softmax'))
+print(model.summary())
+
+model.compile(loss='categorical_crossentropy',
+              optimizer = keras.optimizers.Adam(lr=0.0002),
+              metrics=['accuracy'])
+
+history_1 = model.fit(X_train_padded, categorized_y_train,
+                    batch_size=128,
+                    epochs=14,
+                    validation_data=(X_val_padded, categorized_y_val))
+
+stacked_model_1 = history_1.model
+history_1.model.save('stacked_model_1') 
+
+
+# Change data for a second model
+
+def upsample_data(X, y):
+    combined_unupsampled = []
+    for i,j in zip(X, y):
+        combined_unupsampled.append([i,j])
+    
+    combined_unupsampled = np.asarray(combined_unupsampled)
+    
+    class_name_sample, class_count_unupsampled = np.unique([i for i in y], return_counts=True)
+
+    classes_counts = []
+    for i, j in zip(class_name_sample, class_count_unupsampled):
+        classes_counts.append([i,j])
+    
+    highest_class_count = classes_counts[np.argmax(np.asarray(class_count_unupsampled))][1]
+    
+    upsampled_data_f = []
+    for e, i in enumerate(class_name_sample):
+        temp_data = []
+        if classes_counts[e][1] < highest_class_count:
+
+            for j in range(0, len(combined_unupsampled)):
+                if i == combined_unupsampled[j][1]:
+                    temp_data.append(combined_unupsampled[j])
+            
+            copy_indexes = np.random.choice(len(temp_data), (highest_class_count-(classes_counts[e][1])))
+            temp_data_array = np.asarray(temp_data)
+            new_data = temp_data_array[copy_indexes]
+            for k in temp_data:
+                upsampled_data_f.append(k)
+                k1 = [time_delete(k[0]),k[1]]
+                upsampled_data_f.append(k1)      # double our data
+                # more sample from freq del
+                k2 = [frequency_delete(k[0]),k[1]]
+                upsampled_data_f.append(k2) 
+                # more sample from time&freq del
+                k3 = [time_delete(frequency_delete(k[0])), k[1]]
+                upsampled_data_f.append(k3)
+                # double time and freq delete
+                k4 = [time_delete(frequency_delete(time_delete(frequency_delete(k[0])))), k[1]]
+                upsampled_data_f.append(k4)
+                # random truncated data
+                k5 = [truncater(k[0]),k[1]]
+                upsampled_data_f.append(k5)
+
+            for l in new_data:
+                upsampled_data_f.append(l)
+                l1 = [time_delete(l[0]),l[1]]
+                upsampled_data_f.append(l1)      # double our data
+                # more sample from frew del
+                l2 = [frequency_delete(l[0]),l[1]]
+                upsampled_data_f.append(l2)
+                # more sample from time&freq del
+                l3 = [time_delete(frequency_delete(l[0])), l[1]]
+                upsampled_data_f.append(l3)
+                # double time and freq delete
+                l4 = [time_delete(frequency_delete(time_delete(frequency_delete(l[0])))), l[1]]
+                upsampled_data_f.append(l4)
+                # random truncated data
+                l5 = [truncater(l[0]),l[1]]
+                upsampled_data_f.append(l5)
+        else:
+            for m in range(0, len(combined_unupsampled)):
+                if i == combined_unupsampled[m][1]:
+                    upsampled_data_f.append(combined_unupsampled[m])
+                    upsampled_data_f.append([time_delete(combined_unupsampled[m][0]), combined_unupsampled[m][1]])# double data
+                    upsampled_data_f.append([frequency_delete(combined_unupsampled[m][0]), combined_unupsampled[m][1]]) # tripple data
+                    upsampled_data_f.append([time_delete(frequency_delete(combined_unupsampled[m][0])), combined_unupsampled[m][1]]) # quadradata
+                    upsampled_data_f.append([time_delete(frequency_delete(time_delete(frequency_delete(combined_unupsampled[m][0])))), combined_unupsampled[m][1]]) #pentadata
+                    upsampled_data_f.append([truncater(combined_unupsampled[m][0]), combined_unupsampled[m][1]]) #hexadata
+                    
+
+    shuffled_index = np.arange(len(upsampled_data_f)) 
+    upsampled_data_array = np.asarray(upsampled_data_f)
+    np.random.shuffle(upsampled_data_array)
+    X_train_upsampled_f = upsampled_data_array[:,0]
+    y_train_upsampled_f = upsampled_data_array[:,1]
+    
+    return(X_train_upsampled_f, y_train_upsampled_f)
+
+X_train_upsampled, y_train_upsampled = upsample_data(X_train, y_train)
+
+
+
+X_train_padded = zero_padd(X_train_upsampled)
+X_val_padded = zero_padd(X_val)
+X_test_padded = zero_padd(X_test)
+
+categorized_y_train = change_to_categorical(y_train_upsampled)
+categorized_y_val = change_to_categorical(y_val)
+categorized_y_test = change_to_categorical(y_test)
+
+
+# In[ ]:
+
+
+# fourth stacked model
+model = Sequential()
+#model.add(keras.layers.InputLayer(input_shape=(99,13)))
+model.add(Conv1D(256, 5, activation='relu', padding='same', input_shape=(99,13)))
+model.add(BatchNormalization())
+model.add(Conv1D(256, 5, activation='relu', padding='same'))
+model.add(MaxPooling1D(3))
+model.add(Conv1D(512, 5, activation='relu', padding='same'))
+model.add(Dropout(0.2))
+model.add(layers.Bidirectional(layers.LSTM(256, return_sequences=True)))
+model.add(Dropout(0.2))
+model.add(layers.Bidirectional(layers.LSTM(256, return_sequences=False)))
+model.add(Dropout(0.5))
+model.add(Dense(35, activation='softmax'))
+
+model.summary()
+
+model.compile(loss='categorical_crossentropy',
+              optimizer = keras.optimizers.Adam(lr=0.00009),
+              metrics=['acc'])
+
+history_2 = model.fit(X_train_padded, categorized_y_train,
+                    batch_size=128,
+                    shuffle = True,
+                    epochs=15,
+                    validation_data=(X_val_padded, categorized_y_val))
+
+stacked_model_2 = history_2.model
+history_2.model.save('stacked_model_2') 
+
+# Change data again for a 3th model
+
+def upsample_data(X, y):
+    combined_unupsampled = []
+    for i,j in zip(X, y):
+        combined_unupsampled.append([i,j])
+    
+    combined_unupsampled = np.asarray(combined_unupsampled)
+    
+    class_name_sample, class_count_unupsampled = np.unique([i for i in y], return_counts=True)
+
+    classes_counts = []
+    for i, j in zip(class_name_sample, class_count_unupsampled):
+        classes_counts.append([i,j])
+    
+    highest_class_count = classes_counts[np.argmax(np.asarray(class_count_unupsampled))][1]
+    
+    upsampled_data_f = []
+    for e, i in enumerate(class_name_sample):
+        temp_data = []
+        if classes_counts[e][1] < highest_class_count:
+
+            for j in range(0, len(combined_unupsampled)):
+                if i == combined_unupsampled[j][1]:
+                    temp_data.append(combined_unupsampled[j])
+            
+            copy_indexes = np.random.choice(len(temp_data), (highest_class_count-(classes_counts[e][1])))
+            temp_data_array = np.asarray(temp_data)
+            new_data = temp_data_array[copy_indexes]
+            for k in temp_data:
+                upsampled_data_f.append(k)
+                k1 = [time_delete(k[0]),k[1]]
+                upsampled_data_f.append(k1)      # double our data
+
+
+            for l in new_data:
+                upsampled_data_f.append(l)
+                l1 = [time_delete(l[0]),l[1]]
+                upsampled_data_f.append(l1)      # double our data
+
+        else:
+            for m in range(0, len(combined_unupsampled)):
+                if i == combined_unupsampled[m][1]:
+                    upsampled_data_f.append(combined_unupsampled[m])
+                    upsampled_data_f.append([time_delete(combined_unupsampled[m][0]), combined_unupsampled[m][1]])# double data
+
+    shuffled_index = np.arange(len(upsampled_data_f)) 
+    upsampled_data_array = np.asarray(upsampled_data_f)
+    np.random.shuffle(upsampled_data_array)
+    X_train_upsampled_f = upsampled_data_array[:,0]
+    y_train_upsampled_f = upsampled_data_array[:,1]
+    
+    return(X_train_upsampled_f, y_train_upsampled_f)
+
+X_train_upsampled, y_train_upsampled = upsample_data(X_train, y_train)
+
+X_train_padded = zero_padd(X_train_upsampled)
+X_val_padded = zero_padd(X_val)
+X_test_padded = zero_padd(X_test)
+
+categorized_y_train = change_to_categorical(y_train_upsampled)
+categorized_y_val = change_to_categorical(y_val)
+categorized_y_test = change_to_categorical(y_test)
+
+
+# seventh stacked model
+#change it
+model = Sequential()
+#model.add(Reshape((99, 13), input_shape=(input_shape,)))
+model.add(Conv1D(120, 5, activation='relu', padding='same', input_shape=(99, 13)))
+model.add(BatchNormalization())
+model.add(Conv1D(120, 5, activation='relu', padding='same'))
+model.add(MaxPooling1D(3))
+model.add(Conv1D(160, 5, activation='relu', padding='same'))
+model.add(Conv1D(160, 5, activation='relu', padding='same'))
+model.add(GlobalAveragePooling1D())
+model.add(Dropout(0.40))
+model.add(Dense(35, activation='softmax'))
+
+print(model.summary())
+
+model.compile(loss='categorical_crossentropy',
+              optimizer = keras.optimizers.Adam(lr=0.001),
+              metrics=['acc'])
+
+
+# In[ ]:
+
+
+history_3 = model.fit(X_train_padded, categorized_y_train,
+                    batch_size=256,
+                    epochs=55,
+                    validation_data=(X_val_padded, categorized_y_val))
+
+stacked_model_3 = history_3.model
+history_3.model.save('stacked_model_3')
+
+
+
+
+## STACKED MODEL (with 3 models)
+
+# original data
+# Data for the stacked model
+
+def upsample_data(X, y):
+    combined_unupsampled = []
+    for i,j in zip(X, y):
+        combined_unupsampled.append([i,j])
+    
+    combined_unupsampled = np.asarray(combined_unupsampled)
+    
+    class_name_sample, class_count_unupsampled = np.unique([ i for i in y], return_counts=True)
+
+    classes_counts = []
+    for i, j in zip(class_name_sample, class_count_unupsampled):
+        classes_counts.append([i,j])
+    
+    highest_class_count = classes_counts[np.argmax(np.asarray(class_count_unupsampled))][1]
+    
+    upsampled_data_f = []
+    for e, i in enumerate(class_name_sample):
+        temp_data = []
+        if classes_counts[e][1] < highest_class_count:
+
+            for j in range(0, len(combined_unupsampled)):
+                if i == combined_unupsampled[j][1]:
+                    temp_data.append(combined_unupsampled[j])
+            
+            copy_indexes = np.random.choice(len(temp_data), (highest_class_count-(classes_counts[e][1])))
+            temp_data_array = np.asarray(temp_data)
+            new_data = temp_data_array[copy_indexes]
+            for k in temp_data:
+                upsampled_data_f.append(k)
+            for l in new_data: 
+                upsampled_data_f.append(l)        
+        else:
+            for m in range(0, len(combined_unupsampled)):
+                if i == combined_unupsampled[m][1]:
+                    upsampled_data_f.append(combined_unupsampled[m])
+    shuffled_index = np.arange(len(upsampled_data_f)) 
+    upsampled_data_array = np.asarray(upsampled_data_f)
+    np.random.shuffle(upsampled_data_array)
+    X_train_upsampled_f = upsampled_data_array[:,0]
+    y_train_upsampled_f = upsampled_data_array[:,1]
+    
+    return(X_train_upsampled_f, y_train_upsampled_f)
+
+X_train_original, y_train_original = upsample_data(X_train, y_train)
+y_val_original = y_val
+
+X_train_original_padded = zero_padd(X_train_original) 
+X_val_original_padded = zero_padd(X_val)
+X_test_padded = zero_padd(X_test)
+
+categorized_y_train_original = change_to_categorical(y_train_original)
+categorized_y_val_original = change_to_categorical(y_val_original)
+categorized_y_test = change_to_categorical(y_test)
+
+print(X_train_original_padded.shape)
+print(X_val_original_padded.shape)
+print(X_test_padded.shape)
+print(categorized_y_train_original.shape)
+print(categorized_y_val_original.shape)
+print(categorized_y_test.shape)
+
+
+
+
+# load models from file
+n = 3
+
+def load_models(n_models):
+    models_used = []
+    for i in range(n_models):
+        # define filename for this ensemble
+        model_name = 'stacked_model_' + str(i+1)
+        # load model from file
+        model = load_model(model_name)
+        # add to list of members
+        models_used.append(model)
+        print('>loaded %s' % model_name)
+    return models_used
+
+models_ML = load_models(n)
+
+
+# define stacked model from multiple member input models
+
+def define_stacked_model(members):
+    # update all layers in all models to not be trainable
+    for i in range(len(members)):
+        model = members[i]
+        print(model.input)
+        for e, layer in enumerate(model.layers):
+            # make not trainable
+            layer.trainable = False
+            # rename to avoid 'unique layer name' issue
+            layer.name = 'ensemble_' + str(i+1) + '_' + str(e)
+    # define multi-headed input
+    ensemble_visible = [model.input for model in members]
+    # concatenate merge output from each model
+    ensemble_outputs = [model.output for model in members]
+    merge = concatenate(ensemble_outputs)
+    hidden = Dense(512, activation='relu')(merge)
+    hidden = Dense(256, activation='relu')(hidden)
+    hidden = Dropout(0.10)(hidden)
+    output = Dense(35, activation='softmax')(hidden)
+    model = Model(inputs=ensemble_visible, outputs=output)
+
+    model.compile(loss='categorical_crossentropy', optimizer=keras.optimizers.Adam(lr=0.0001), metrics=['accuracy'])
+    return model
+
+
+stacked_model = define_stacked_model(models_ML)
+
+X = [X_test_padded for _ in range(n)]
+X_val_final = [X_val_original_padded for _ in range(n)]
+lol = stacked_model.fit(X, categorized_y_test, epochs=15, shuffle = True, verbose=1, validation_data = (X_val_final, categorized_y_val_original))
+lol.model.save('final_stacked_model') 
+
+## Test Output for Combined Models
+
+assignment_test_padded = zero_padd(assignment_test_data_ordered_array)
+
+
+# model output
+model = keras.models.load_model('final_stacked_model')
+
+X = [assignment_test_padded for _ in range(n)]
+test_result_combined_models = model.predict(X, verbose=0)
+
+test_result = []
+for i in test_result_combined_models:
+    class_predicted = np.argmax(i)
+    test_result.append(class_predicted)
+    
+result = np.asarray(test_result)    
+
+print(result.shape)
+print(result[:30])
+
+
+def produce_output(model_output):
+    result_classes = []
+    path_assignment = np.asarray(test_data_MFCC)
+
+    for i, h in zip(model_output, path_assignment):
+        for j in class_name_dict.items():
+            if i == j[1]:
+                result_classes.append([str(h)[2:-2], j[0]])
+    result_df = pd.DataFrame(result_classes).rename(columns={0: "path", 1: "word"})
+    result_df.to_csv('result.csv', sep=',', index=False)
+    return print('results saved as result.csv')
+
+produce_output(result)
